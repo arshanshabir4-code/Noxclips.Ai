@@ -1,10 +1,11 @@
-
 import os
+import gc
 import uuid
+import shutil
 import zipfile
 import subprocess
 import cv2
-import whisper
+from faster_whisper import WhisperModel
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,8 +19,8 @@ os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
-# Load lightweight Whisper model (fits within Render's free 512MB RAM limit)
-model = whisper.load_model("tiny")
+# Load lightweight INT8 quantized Whisper model (~120MB RAM total)
+model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 
 def get_face_center_x(video_path: str, start_sec: float, duration: float) -> int:
@@ -40,7 +41,7 @@ def get_face_center_x(video_path: str, start_sec: float, duration: float) -> int
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, 1.1, 4)
         if len(faces) > 0:
-            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+            x, y, w, h = max(faces, key=lambda f: f * f)
             centers.append(x + w // 2)
         cap.set(cv2.CAP_PROP_POS_FRAMES, cap.get(cv2.CAP_PROP_POS_FRAMES) + int(fps))
         
@@ -74,7 +75,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         chunk = words[i:i + chunk_size]
         if not chunk:
             continue
-        c_start = max(0, chunk[0]["start"] - start_offset)
+        c_start = max(0, chunk["start"] - start_offset)
         c_end = max(c_start + 0.2, chunk[-1]["end"] - start_offset)
         
         text = " ".join([w["word"].strip().upper() for w in chunk])
@@ -103,10 +104,10 @@ def detect_highlights(segments: list, clip_duration: int = 30) -> list:
         
         scored_windows.append((score, start, window_segs))
 
-    scored_windows.sort(key=lambda x: x[0], reverse=True)
+    scored_windows.sort(key=lambda x: x, reverse=True)
     selected = []
     for score, start, window_segs in scored_windows:
-        if all(abs(start - s[0]) >= clip_duration for s in selected):
+        if all(abs(start - s) >= clip_duration for s in selected):
             selected.append((start, window_segs))
         if len(selected) == 3:
             break
@@ -128,13 +129,22 @@ async def process_video(
     job_dir = os.path.join("outputs", job_id)
     os.makedirs(job_dir, exist_ok=True)
 
+    # Stream file to disk in chunks to prevent RAM spikes
     input_path = os.path.join("uploads", f"{job_id}_{file.filename}")
     with open(input_path, "wb") as buffer:
-        buffer.write(await file.read())
+        shutil.copyfileobj(file.file, buffer)
 
-    # 1. Transcribe with word-level timestamps via Whisper
-    result = model.transcribe(input_path, word_timestamps=True)
-    segments = result.get("segments", [])
+    # 1. Transcribe with faster-whisper
+    raw_segments, _ = model.transcribe(input_path, word_timestamps=True)
+    segments = []
+    for seg in raw_segments:
+        words_list = [{"word": w.word, "start": w.start, "end": w.end} for w in (seg.words or [])]
+        segments.append({
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text,
+            "words": words_list
+        })
 
     # 2. Detect top 30-second highlights
     highlights = detect_highlights(segments, clip_duration=30)
@@ -169,9 +179,10 @@ async def process_video(
 
         out_clip = os.path.join(job_dir, f"clip_{idx + 1}.mp4")
         
-        # 4. FFmpeg Cut, Crop & Burn Animated Captions
+        # 4. FFmpeg Cut, Crop & Burn Animated Captions (single thread to save RAM)
         cmd = [
             "ffmpeg", "-y",
+            "-threads", "1",
             "-ss", str(start_time),
             "-t", "30",
             "-i", input_path,
@@ -192,6 +203,11 @@ async def process_video(
         for path in clip_paths:
             if os.path.exists(path):
                 zipf.write(path, os.path.basename(path))
+
+    # Clean up uploaded raw file and free memory
+    if os.path.exists(input_path):
+        os.remove(input_path)
+    gc.collect()
 
     return JSONResponse({
         "job_id": job_id,
