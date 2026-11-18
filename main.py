@@ -65,7 +65,12 @@ def detect_highlights(segments: list, clip_duration: int = 30) -> list:
 
 @app.get("/")
 def serve_ui():
-    return FileResponse("static/index.html")
+    for path in ["static/index.html", "Static/index.html", "index.html"]:
+        if os.path.exists(path):
+            return FileResponse(path)
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse("<h1>NoxClips AI is Live!</h1><p>static/index.html was not found.</p>")
+
 
 @app.post("/api/process")
 async def process_video(file: UploadFile = File(...), aspect_ratio: str = Form("auto"), ai_style: str = Form("mixed")):
