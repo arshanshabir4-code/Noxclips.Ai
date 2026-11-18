@@ -1,1 +1,196 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Clip Studio — Free Open-Source Clipper</title>
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --surface: #141821;
+      --border: #232938;
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+    }
+    * { box-sizing: border-box; font-family: 'Inter', system-ui, sans-serif; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container { max-width: 900px; width: 100%; }
+    header { text-align: center; margin-bottom: 2rem; }
+    header h1 { font-size: 2rem; margin: 0 0 0.5rem; }
+    header p { color: var(--muted); margin: 0; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .badge-box {
+      background: #0f1219;
+      border: 1px solid var(--border);
+      padding: 0.75rem 1rem;
+      border-radius: 10px;
+    }
+    .badge-box span { display: block; font-size: 0.75rem; color: var(--muted); }
+    .badge-box strong { font-size: 0.95rem; color: #a5b4fc; }
+
+    .upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 2.5rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s;
+      display: block;
+    }
+    .upload-zone:hover { border-color: var(--accent); }
+    input[type="file"] { display: none; }
+
+    .btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 0.85rem 1.5rem;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+      font-size: 1rem;
+      margin-top: 1rem;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-zip { background: #10b981; margin-bottom: 1.5rem; display: inline-block; text-align: center; text-decoration: none; }
+    .btn-zip:hover { background: #059669; }
+
+    .clips-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1.25rem;
+    }
+    .clip-card {
+      background: #0f1219;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+      text-align: center;
+    }
+    video { width: 100%; border-radius: 8px; background: #000; margin-bottom: 0.75rem; }
+    .dl-link {
+      display: block;
+      padding: 0.6rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    .dl-link:hover { border-color: var(--accent); }
+    #status { text-align: center; margin-top: 1rem; color: #a5b4fc; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>⚡ AI Clip Studio</h1>
+      <p>Whisper + OpenCV Face Tracking + FFmpeg Animated Captions</p>
+    </header>
+
+    <div class="card">
+      <div class="settings-grid">
+        <div class="badge-box"><span>Duration</span><strong>30 Seconds</strong></div>
+        <div class="badge-box"><span>AI Style</span><strong>Mixed (Hooks + Density)</strong></div>
+        <div class="badge-box"><span>Aspect Ratio</span><strong>Auto (Face Track 9:16)</strong></div>
+        <div class="badge-box"><span>Captions</span><strong>Animated Pop-In</strong></div>
+      </div>
+
+      <label class="upload-zone" for="videoInput">
+        <div id="fileLabel">📁 Click to select a video file (MP4, MOV, MKV)</div>
+        <input type="file" id="videoInput" accept="video/*" />
+      </label>
+
+      <button class="btn" id="generateBtn" disabled>Generate 30s Clips</button>
+      <div id="status"></div>
+    </div>
+
+    <div id="resultsSection" style="display: none;">
+      <a id="zipBtn" class="btn btn-zip" href="#" download>📦 Download All Clips (ZIP)</a>
+      <div class="clips-grid" id="clipsGrid"></div>
+    </div>
+  </div>
+
+  <script>
+    const videoInput = document.getElementById('videoInput');
+    const fileLabel = document.getElementById('fileLabel');
+    const generateBtn = document.getElementById('generateBtn');
+    const status = document.getElementById('status');
+    const resultsSection = document.getElementById('resultsSection');
+    const clipsGrid = document.getElementById('clipsGrid');
+    const zipBtn = document.getElementById('zipBtn');
+
+    videoInput.addEventListener('change', () => {
+      if (videoInput.files.length > 0) {
+        fileLabel.textContent = `Selected: ${videoInput.files[0].name}`;
+        generateBtn.disabled = false;
+      }
+    });
+
+    generateBtn.addEventListener('click', async () => {
+      const file = videoInput.files[0];
+      if (!file) return;
+
+      generateBtn.disabled = true;
+      resultsSection.style.display = 'none';
+      status.textContent = '⏳ Transcribing with Whisper, tracking faces, and rendering captions...';
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('aspect_ratio', 'auto');
+      formData.append('ai_style', 'mixed');
+
+      try {
+        const res = await fetch('/api/process', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        clipsGrid.innerHTML = '';
+        data.clips.forEach((url, index) => {
+          const card = document.createElement('div');
+          card.className = 'clip-card';
+          card.innerHTML = `
+            <video src="${url}" controls></video>
+            <a class="dl-link" href="${url}" download="clip_${index + 1}.mp4">⬇️ Download Clip ${index + 1}</a>
+          `;
+          clipsGrid.appendChild(card);
+        });
+
+        zipBtn.href = data.zip_url;
+        resultsSection.style.display = 'block';
+        status.textContent = '✅ Done! Your clips are ready.';
+      } catch (err) {
+        status.textContent = '❌ Error processing video. Check server logs.';
+      } finally {
+        generateBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
