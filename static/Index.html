@@ -149,7 +149,8 @@
 
     videoInput.addEventListener('change', () => {
       if (videoInput.files.length > 0) {
-        fileLabel.textContent = `Selected: ${videoInput.files[0].name}`;
+        const file = videoInput.files;
+
         generateBtn.disabled = false;
       }
     });
