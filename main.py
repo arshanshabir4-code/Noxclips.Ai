@@ -3,28 +3,227 @@ import gc
 import uuid
 import shutil
 import zipfile
+import traceback
 import subprocess
 import cv2
 from faster_whisper import WhisperModel
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
 
 os.makedirs("uploads", exist_ok=True)
 os.makedirs("outputs", exist_ok=True)
-os.makedirs("static", exist_ok=True)
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 
 # Load lightweight INT8 quantized Whisper model (~120MB RAM total)
 model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
+HTML_UI = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NoxClips AI — Free Open-Source Clipper</title>
+  <style>
+    :root {
+      --bg: #0b0d12;
+      --surface: #141821;
+      --border: #232938;
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+    }
+    * { box-sizing: border-box; font-family: 'Inter', system-ui, sans-serif; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container { max-width: 900px; width: 100%; }
+    header { text-align: center; margin-bottom: 2rem; }
+    header h1 { font-size: 2rem; margin: 0 0 0.5rem; }
+    header p { color: var(--muted); margin: 0; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    .badge-box {
+      background: #0f1219;
+      border: 1px solid var(--border);
+      padding: 0.75rem 1rem;
+      border-radius: 10px;
+    }
+    .badge-box span { display: block; font-size: 0.75rem; color: var(--muted); }
+    .badge-box strong { font-size: 0.95rem; color: #a5b4fc; }
+
+    .upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      padding: 2.5rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s;
+      display: block;
+    }
+    .upload-zone:hover { border-color: var(--accent); }
+    input[type="file"] { display: none; }
+
+    .btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 0.85rem 1.5rem;
+      border-radius: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+      font-size: 1rem;
+      margin-top: 1rem;
+    }
+    .btn:hover { background: var(--accent-hover); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-zip { background: #10b981; margin-bottom: 1.5rem; display: inline-block; text-align: center; text-decoration: none; }
+    .btn-zip:hover { background: #059669; }
+
+    .clips-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1.25rem;
+    }
+    .clip-card {
+      background: #0f1219;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+      text-align: center;
+    }
+    video { width: 100%; border-radius: 8px; background: #000; margin-bottom: 0.75rem; }
+    .dl-link {
+      display: block;
+      padding: 0.6rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    .dl-link:hover { border-color: var(--accent); }
+    #status { text-align: center; margin-top: 1rem; color: #a5b4fc; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>⚡ NoxClips AI</h1>
+      <p>Whisper + OpenCV Face Tracking + FFmpeg Animated Captions</p>
+    </header>
+
+    <div class="card">
+      <div class="settings-grid">
+        <div class="badge-box"><span>Duration</span><strong>30 Seconds</strong></div>
+        <div class="badge-box"><span>AI Style</span><strong>Mixed (Hooks + Density)</strong></div>
+        <div class="badge-box"><span>Aspect Ratio</span><strong>Auto (Face Track 9:16)</strong></div>
+        <div class="badge-box"><span>Captions</span><strong>Animated Pop-In</strong></div>
+      </div>
+
+      <label class="upload-zone" for="videoInput">
+        <div id="fileLabel">📁 Click to select a video file (MP4, MOV, MKV)</div>
+        <input type="file" id="videoInput" accept="video/*" />
+      </label>
+
+      <button class="btn" id="generateBtn" disabled>Generate 30s Clips</button>
+      <div id="status"></div>
+    </div>
+
+    <div id="resultsSection" style="display: none;">
+      <a id="zipBtn" class="btn btn-zip" href="#" download>📦 Download All Clips (ZIP)</a>
+      <div class="clips-grid" id="clipsGrid"></div>
+    </div>
+  </div>
+
+  <script>
+    const videoInput = document.getElementById('videoInput');
+    const fileLabel = document.getElementById('fileLabel');
+    const generateBtn = document.getElementById('generateBtn');
+    const status = document.getElementById('status');
+    const resultsSection = document.getElementById('resultsSection');
+    const clipsGrid = document.getElementById('clipsGrid');
+    const zipBtn = document.getElementById('zipBtn');
+
+    videoInput.addEventListener('change', () => {
+      if (videoInput.files.length > 0) {
+        fileLabel.textContent = `Selected: ${videoInput.files[0].name}`;
+        generateBtn.disabled = false;
+      }
+    });
+
+    generateBtn.addEventListener('click', async () => {
+      const file = videoInput.files[0];
+      if (!file) return;
+
+      generateBtn.disabled = true;
+      resultsSection.style.display = 'none';
+      status.textContent = '⏳ Transcribing with Whisper, tracking faces, and rendering captions...';
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('aspect_ratio', 'auto');
+      formData.append('ai_style', 'mixed');
+
+      try {
+        const res = await fetch('/api/process', { method: 'POST', body: formData });
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.error || 'Server processing failed');
+        }
+
+        clipsGrid.innerHTML = '';
+        data.clips.forEach((url, index) => {
+          const card = document.createElement('div');
+          card.className = 'clip-card';
+          card.innerHTML = `
+            <video src="${url}" controls></video>
+            <a class="dl-link" href="${url}" download="clip_${index + 1}.mp4">⬇️ Download Clip ${index + 1}</a>
+          `;
+          clipsGrid.appendChild(card);
+        });
+
+        zipBtn.href = data.zip_url;
+        resultsSection.style.display = 'block';
+        status.textContent = '✅ Done! Your clips are ready.';
+      } catch (err) {
+        status.textContent = `❌ Error: ${err.message}`;
+      } finally {
+        generateBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
 
 def get_face_center_x(video_path: str, start_sec: float, duration: float) -> int:
-    """Uses OpenCV Haar Cascades to find the average horizontal center of a speaker's face."""
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -41,7 +240,7 @@ def get_face_center_x(video_path: str, start_sec: float, duration: float) -> int
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, 1.1, 4)
         if len(faces) > 0:
-            x, y, w, h = max(faces, key=lambda f: f * f)
+            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
             centers.append(x + w // 2)
         cap.set(cv2.CAP_PROP_POS_FRAMES, cap.get(cv2.CAP_PROP_POS_FRAMES) + int(fps))
         
@@ -50,7 +249,6 @@ def get_face_center_x(video_path: str, start_sec: float, duration: float) -> int
 
 
 def generate_animated_ass(words: list, start_offset: float, ass_path: str):
-    """Creates an Advanced SubStation Alpha (.ass) file with pop-in animated captions."""
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -75,7 +273,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         chunk = words[i:i + chunk_size]
         if not chunk:
             continue
-        c_start = max(0, chunk["start"] - start_offset)
+        c_start = max(0, chunk[0]["start"] - start_offset)
         c_end = max(c_start + 0.2, chunk[-1]["end"] - start_offset)
         
         text = " ".join([w["word"].strip().upper() for w in chunk])
@@ -87,7 +285,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def detect_highlights(segments: list, clip_duration: int = 30) -> list:
-    """Scores transcript segments for high-energy hooks and questions."""
     hook_words = {"why", "how", "secret", "never", "stop", "mistake", "truth", "best", "worst", "money", "ai"}
     scored_windows = []
 
@@ -98,119 +295,3 @@ def detect_highlights(segments: list, clip_duration: int = 30) -> list:
             continue
             
         full_text = " ".join(s["text"].lower() for s in window_segs)
-        score = len(full_text.split())
-        score += sum(10 for w in hook_words if w in full_text)
-        score += full_text.count("?") * 15
-        
-        scored_windows.append((score, start, window_segs))
-
-    scored_windows.sort(key=lambda x: x, reverse=True)
-    selected = []
-    for score, start, window_segs in scored_windows:
-        if all(abs(start - s) >= clip_duration for s in selected):
-            selected.append((start, window_segs))
-        if len(selected) == 3:
-            break
-    return selected
-
-
-@app.get("/")
-def serve_ui():
-    return FileResponse("static/index.html")
-
-
-@app.post("/api/process")
-async def process_video(
-    file: UploadFile = File(...),
-    aspect_ratio: str = Form("auto"),
-    ai_style: str = Form("mixed")
-):
-    job_id = str(uuid.uuid4())[:8]
-    job_dir = os.path.join("outputs", job_id)
-    os.makedirs(job_dir, exist_ok=True)
-
-    # Stream file to disk in chunks to prevent RAM spikes
-    input_path = os.path.join("uploads", f"{job_id}_{file.filename}")
-    with open(input_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    # 1. Transcribe with faster-whisper
-    raw_segments, _ = model.transcribe(input_path, word_timestamps=True)
-    segments = []
-    for seg in raw_segments:
-        words_list = [{"word": w.word, "start": w.start, "end": w.end} for w in (seg.words or [])]
-        segments.append({
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text,
-            "words": words_list
-        })
-
-    # 2. Detect top 30-second highlights
-    highlights = detect_highlights(segments, clip_duration=30)
-    if not highlights:
-        highlights = [(0.0, segments)]
-
-    cap = cv2.VideoCapture(input_path)
-    orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-
-    clip_urls = []
-    clip_paths = []
-
-    for idx, (start_time, window_segs) in enumerate(highlights):
-        words = []
-        for s in window_segs:
-            words.extend(s.get("words", []))
-
-        ass_path = os.path.join(job_dir, f"subs_{idx}.ass")
-        generate_animated_ass(words, start_time, ass_path)
-
-        # 3. Aspect Ratio & OpenCV Face Tracking Crop
-        if aspect_ratio == "auto" or aspect_ratio == "9:16":
-            face_x = get_face_center_x(input_path, start_time, 30)
-            target_w = int(orig_h * (9 / 16))
-            target_w = min(target_w, orig_w)
-            crop_x = max(0, min(orig_w - target_w, face_x - target_w // 2))
-            vf_filter = f"crop={target_w}:{orig_h}:{crop_x}:0,scale=1080:1920,ass={ass_path}"
-        else:
-            vf_filter = f"scale=1920:1080,ass={ass_path}"
-
-        out_clip = os.path.join(job_dir, f"clip_{idx + 1}.mp4")
-        
-        # 4. FFmpeg Cut, Crop & Burn Animated Captions (single thread to save RAM)
-        cmd = [
-            "ffmpeg", "-y",
-            "-threads", "1",
-            "-ss", str(start_time),
-            "-t", "30",
-            "-i", input_path,
-            "-vf", vf_filter,
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
-            "-c:a", "aac", "-b:a", "128k",
-            out_clip
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        clip_urls.append(f"/outputs/{job_id}/clip_{idx + 1}.mp4")
-        clip_paths.append(out_clip)
-
-    # 5. Bundle all clips into a single ZIP file
-    zip_filename = f"clips_{job_id}.zip"
-    zip_path = os.path.join(job_dir, zip_filename)
-    with zipfile.ZipFile(zip_path, "w") as zipf:
-        for path in clip_paths:
-            if os.path.exists(path):
-                zipf.write(path, os.path.basename(path))
-
-    # Clean up uploaded raw file and free memory
-    if os.path.exists(input_path):
-        os.remove(input_path)
-    gc.collect()
-
-    return JSONResponse({
-        "job_id": job_id,
-        "clips": clip_urls,
-        "zip_url": f"/outputs/{job_id}/{zip_filename}"
-    })
