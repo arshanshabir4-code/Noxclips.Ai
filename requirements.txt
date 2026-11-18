@@ -2,6 +2,4 @@ fastapi
 uvicorn
 python-multipart
 opencv-python-headless
-openai-whisper
---extra-index-url https://pytorch.org
-torch
+faster-whisper
