@@ -1,7 +1,7 @@
 import os, gc, uuid, shutil, zipfile, traceback, subprocess, cv2
 from faster_whisper import WhisperModel
 from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
@@ -10,106 +10,90 @@ os.makedirs("outputs", exist_ok=True)
 app.mount("/outputs", StaticFiles(directory="outputs"), name="outputs")
 model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
-def get_face_center_x(video_path: str, start_sec: float, duration: float) -> int:
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_sec * fps))
+UI = """<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>NoxClips AI</title><style>body{background:#0b0d12;color:#f3f4f6;font-family:system-ui,sans-serif;margin:0;padding:1.5rem;display:flex;justify-content:center}.box{max-width:750px;width:100%}header{text-align:center;margin-bottom:1.5rem}.card{background:#141821;border:1px solid #232938;border-radius:14px;padding:1.25rem;margin-bottom:1.5rem}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:.75rem;margin-bottom:1.25rem}.b{background:#0f1219;border:1px solid #232938;padding:.65rem;border-radius:8px}.b span{display:block;font-size:.7rem;color:#9ca3af}.b strong{font-size:.85rem;color:#a5b4fc}.up{border:2px dashed #232938;border-radius:12px;padding:2rem 1rem;text-align:center;cursor:pointer;display:block}input{display:none}.btn{background:#6366f1;color:#fff;border:none;padding:.85rem;border-radius:10px;font-weight:600;cursor:pointer;width:100%;font-size:1rem;margin-top:1rem}.btn:disabled{opacity:.5}.zip{background:#10b981;display:block;text-align:center;text-decoration:none;margin-bottom:1rem}.clips{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem}.cc{background:#0f1219;border:1px solid #232938;border-radius:10px;padding:.75rem;text-align:center}video{width:100%;border-radius:8px;background:#000;margin-bottom:.5rem}.dl{display:block;padding:.5rem;background:#141821;border:1px solid #232938;color:#fff;border-radius:6px;text-decoration:none;font-size:.85rem}#st{text-align:center;margin-top:1rem;color:#a5b4fc}</style></head><body><div class="box"><header><h1>⚡ NoxClips AI</h1><p style="color:#9ca3af">30s Viral Clipper • Auto Face Tracking • Animated Captions</p></header><div class="card"><div class="grid"><div class="b"><span>Duration</span><strong>30 Seconds</strong></div><div class="b"><span>AI Style</span><strong>Mixed Hooks</strong></div><div class="b"><span>Aspect Ratio</span><strong>Auto 9:16</strong></div><div class="b"><span>Captions</span><strong>Animated</strong></div></div><label class="up" for="v"><div id="lbl">📁 Tap to select a video (MP4, MOV)</div><input type="file" id="v" accept="video/*"></label><button class="btn" id="btn" disabled>Generate 30s Clips</button><div id="st"></div></div><div id="res" style="display:none"><a id="zip" class="btn zip" href="#" download>📦 Download All Clips (ZIP)</a><div class="clips" id="cg"></div></div></div><script>const v=document.getElementById('v'),lbl=document.getElementById('lbl'),btn=document.getElementById('btn'),st=document.getElementById('st'),res=document.getElementById('res'),cg=document.getElementById('cg'),zip=document.getElementById('zip');v.onchange=()=>{if(v.files.length){lbl.textContent='Selected: '+v.files.name;btn.disabled=false}};btn.onclick=async()=>{const f=v.files;if(!f)return;btn.disabled=true;res.style.display='none';st.textContent='⏳ Processing video (1-2 mins)...';const fd=new FormData();fd.append('file',f);try{const r=await fetch('/api/process',{method:'POST',body:fd});const d=await r.json();if(!r.ok)throw new Error(d.error||'Failed');cg.innerHTML='';d.clips.forEach((u,i)=>{cg.innerHTML+=`<div class="cc"><video src="${u}" controls></video><a class="dl" href="${u}" download="clip_${i+1}.mp4">⬇️ Download Clip ${i+1}</a></div>`});zip.href=d.zip_url;res.style.display='block';st.textContent='✅ Clips ready!'}catch(e){st.textContent='❌ Error: '+e.message}finally{btn.disabled=false}}</script></body></html>"""
+
+def get_face_x(path: str, start: float, dur: float) -> int:
+    cap = cv2.VideoCapture(path)
+    fps, w = cap.get(cv2.CAP_PROP_FPS) or 30, int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    fc = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    cap.set(cv2.CAP_PROP_POS_FRAMES, int(start * fps))
     centers = []
-    for _ in range(int(duration)):
+    for _ in range(int(dur)):
         ret, frame = cap.read()
         if not ret: break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        faces = fc.detectMultiScale(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), 1.1, 4)
         if len(faces) > 0:
-            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
-            centers.append(x + w // 2)
+            x, y, fw, fh = max(faces, key=lambda f: f * f)
+            centers.append(x + fw // 2)
         cap.set(cv2.CAP_PROP_POS_FRAMES, cap.get(cv2.CAP_PROP_POS_FRAMES) + int(fps))
     cap.release()
-    return int(sum(centers) / len(centers)) if centers else width // 2
+    return int(sum(centers) / len(centers)) if centers else w // 2
 
-def generate_animated_ass(words: list, start_offset: float, ass_path: str):
-    header = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,85,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,2,2,50,50,260,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-    def fmt_time(s: float) -> str:
-        return f"{int(s//3600)}:{int((s%3600)//60):02d}:{s%60:05.2f}"
-    events = []
+def make_ass(words: list, offset: float, out: str):
+    hdr = "[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,85,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,5,2,2,50,50,260,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    fmt = lambda s: f"{int(s//3600)}:{int((s%3600)//60):02d}:{s%60:05.2f}"
+    ev = []
     for i in range(0, len(words), 3):
-        chunk = words[i:i+3]
-        if not chunk: continue
-        c_start = max(0, chunk[0]["start"] - start_offset)
-        c_end = max(c_start + 0.2, chunk[-1]["end"] - start_offset)
-        text = " ".join([w["word"].strip().upper() for w in chunk])
-        anim = r"{\fscx80\fscy80\t(0,80,\fscx105\fscy105)\t(80,150,\fscx100\fscy100)\c&H0000FFFF&}"
-        events.append(f"Dialogue: 0,{fmt_time(c_start)},{fmt_time(c_end)},Default,,0,0,0,,{anim}{text}")
-    with open(ass_path, "w", encoding="utf-8") as f:
-        f.write(header + "\n".join(events))
+        c = words[i:i+3]
+        if not c: continue
+        s, e = max(0, c["start"] - offset), max(c["start"] - offset + 0.2, c[-1]["end"] - offset)
+        txt = " ".join(w["word"].strip().upper() for w in c)
+        ev.append(f"Dialogue: 0,{fmt(s)},{fmt(e)},Default,,0,0,0,,{{\\fscx80\\fscy80\\t(0,80,\\fscx105\\fscy105)\\t(80,150,\\fscx100\\fscy100)\\c&H0000FFFF&}}{txt}")
+    with open(out, "w", encoding="utf-8") as f: f.write(hdr + "\n".join(ev))
 
-def detect_highlights(segments: list, clip_duration: int = 30) -> list:
+def find_clips(segs: list, dur: int = 30) -> list:
     hooks = {"why", "how", "secret", "never", "stop", "mistake", "truth", "best", "worst", "money", "ai"}
     scored = []
-    for seg in segments:
-        start = seg["start"]
-        win = [s for s in segments if s["start"] >= start and s["end"] <= start + clip_duration]
+    for s in segs:
+        st = s["start"]
+        win = [x for x in segs if x["start"] >= st and x["end"] <= st + dur]
         if not win: continue
-        txt = " ".join(s["text"].lower() for s in win)
-        score = len(txt.split()) + sum(10 for w in hooks if w in txt) + txt.count("?") * 15
-        scored.append((score, start, win))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    selected = []
-    for score, start, win in scored:
-        if all(abs(start - s[0]) >= clip_duration for s in selected):
-            selected.append((start, win))
-        if len(selected) == 3: break
-    return selected
+        txt = " ".join(x["text"].lower() for x in win)
+        scored.append((len(txt.split()) + sum(10 for w in hooks if w in txt) + txt.count("?") * 15, st, win))
+    scored.sort(key=lambda x: x, reverse=True)
+    sel = []
+    for _, st, win in scored:
+        if all(abs(st - x) >= dur for x in sel): sel.append((st, win))
+        if len(sel) == 3: break
+    return sel
 
 @app.get("/")
-def serve_ui():
-    for path in ["static/index.html", "Static/index.html", "index.html"]:
-        if os.path.exists(path):
-            return FileResponse(path)
-    from fastapi.responses import HTMLResponse
-    return HTMLResponse("<h1>NoxClips AI is Live!</h1><p>static/index.html was not found.</p>")
-
+def home():
+    return HTMLResponse(UI)
 
 @app.post("/api/process")
-async def process_video(file: UploadFile = File(...), aspect_ratio: str = Form("auto"), ai_style: str = Form("mixed")):
+async def process(file: UploadFile = File(...)):
     try:
-        job_id = str(uuid.uuid4())[:8]
-        job_dir = os.path.join("outputs", job_id)
-        os.makedirs(job_dir, exist_ok=True)
-        input_path = os.path.join("uploads", f"{job_id}_{file.filename}")
-        with open(input_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        raw_segs, _ = model.transcribe(input_path, word_timestamps=True)
-        segments = [{"start": s.start, "end": s.end, "text": s.text, "words": [{"word": w.word, "start": w.start, "end": w.end} for w in (s.words or [])]} for s in raw_segs]
-        highlights = detect_highlights(segments, 30) or [(0.0, segments)]
-        cap = cv2.VideoCapture(input_path)
-        orig_w, orig_h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        jid = str(uuid.uuid4())[:8]
+        jdir = os.path.join("outputs", jid)
+        os.makedirs(jdir, exist_ok=True)
+        ipath = os.path.join("uploads", f"{jid}_{file.filename}")
+        with open(ipath, "wb") as b: shutil.copyfileobj(file.file, b)
+        raw, _ = model.transcribe(ipath, word_timestamps=True)
+        segs = [{"start": s.start, "end": s.end, "text": s.text, "words": [{"word": w.word, "start": w.start, "end": w.end} for w in (s.words or [])]} for s in raw]
+        clips = find_clips(segs, 30) or [(0.0, segs)]
+        cap = cv2.VideoCapture(ipath)
+        ow, oh = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
-        clip_urls, clip_paths = [], []
-        for idx, (start_time, win_segs) in enumerate(highlights):
-            words = [w for s in win_segs for w in s.get("words", [])]
-            ass_path = os.path.join(job_dir, f"subs_{idx}.ass")
-            generate_animated_ass(words, start_time, ass_path)
-            if aspect_ratio in ("auto", "9:16"):
-                face_x = get_face_center_x(input_path, start_time, 30)
-                target_w = min(int(orig_h * (9 / 16)), orig_w)
-                crop_x = max(0, min(orig_w - target_w, face_x - target_w // 2))
-                vf = f"crop={target_w}:{orig_h}:{crop_x}:0,scale=1080:1920,ass={ass_path}"
-            else:
-                vf = f"scale=1920:1080,ass={ass_path}"
-            out_clip = os.path.join(job_dir, f"clip_{idx + 1}.mp4")
-            subprocess.run(["ffmpeg", "-y", "-threads", "1", "-ss", str(start_time), "-t", "30", "-i", input_path, "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-c:a", "aac", "-b:a", "128k", out_clip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            clip_urls.append(f"/outputs/{job_id}/clip_{idx + 1}.mp4")
-            clip_paths.append(out_clip)
-        zip_name = f"clips_{job_id}.zip"
-        with zipfile.ZipFile(os.path.join(job_dir, zip_name), "w") as zipf:
-            for p in clip_paths:
-                if os.path.exists(p): zipf.write(p, os.path.basename(p))
-        if os.path.exists(input_path): os.remove(input_path)
+        urls, paths = [], []
+        for i, (st, win) in enumerate(clips):
+            ass = os.path.join(jdir, f"s_{i}.ass")
+            make_ass([w for s in win for w in s.get("words", [])], st, ass)
+            fx = get_face_x(ipath, st, 30)
+            tw = min(int(oh * (9 / 16)), ow)
+            cx = max(0, min(ow - tw, fx - tw // 2))
+            vf = f"crop={tw}:{oh}:{cx}:0,scale=1080:1920,ass={ass}"
+            out = os.path.join(jdir, f"clip_{i+1}.mp4")
+            subprocess.run(["ffmpeg", "-y", "-threads", "1", "-ss", str(st), "-t", "30", "-i", ipath, "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26", "-c:a", "aac", "-b:a", "128k", out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            urls.append(f"/outputs/{jid}/clip_{i+1}.mp4")
+            paths.append(out)
+        zname = f"clips_{jid}.zip"
+        with zipfile.ZipFile(os.path.join(jdir, zname), "w") as z:
+            for p in paths:
+                if os.path.exists(p): z.write(p, os.path.basename(p))
+        if os.path.exists(ipath): os.remove(ipath)
         gc.collect()
-        return JSONResponse({"job_id": job_id, "clips": clip_urls, "zip_url": f"/outputs/{job_id}/{zip_name}"})
+        return JSONResponse({"job_id": jid, "clips": urls, "zip_url": f"/outputs/{jid}/{zname}"})
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"error": str(e)}, status_code=500)
